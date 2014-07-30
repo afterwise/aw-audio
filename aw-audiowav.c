@@ -15,13 +15,14 @@ static size_t wav_render(s16 **output, u64 *frame_offset, const struct audio_wav
 	return frame_count * (waveform->channel_count * sizeof (s16));
 }
 
-void audio_waveform_set_wav(struct audio_waveform *waveform, const void *data, size_t size) {
+int audio_waveform_set_wav(struct audio_waveform *waveform, const void *data, size_t size) {
 	struct wav_info info;
+	int err;
 
 	(void) size;
 
-	if (wav_parse(&info, data) < 0)
-		trespass();
+	if ((err = wav_parse(&info, data)) < 0)
+		return err;
 
 	waveform->render = &wav_render;
 	waveform->data = info.blocks;
@@ -33,5 +34,7 @@ void audio_waveform_set_wav(struct audio_waveform *waveform, const void *data, s
 	waveform->native_format = (waveform->channel_count == 1) ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16;
 
 	waveform->sample_rate = round_f64(info.sample_rate);
+
+	return 0;
 }
 

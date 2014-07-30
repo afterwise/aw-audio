@@ -71,8 +71,8 @@ static inline u64 audio_waveform_bufferable(const struct audio_waveform *wavefor
 		waveform->frame_count - offset);
 }
 
-void audio_waveform_set_wav(struct audio_waveform *waveform, const void *data, size_t size);
-void audio_waveform_set_caf(struct audio_waveform *waveform, const void *data, size_t size);
+int audio_waveform_set_wav(struct audio_waveform *waveform, const void *data, size_t size);
+int audio_waveform_set_caf(struct audio_waveform *waveform, const void *data, size_t size);
 
 #ifdef __cplusplus
 } /* extern "C" */
