@@ -1,6 +1,4 @@
 
-#define IMA_IMPLEMENTATION
-
 #include "aw-audio.h"
 #include "aw-ima.h"
 #include "aw-debug.h"
