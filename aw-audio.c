@@ -189,7 +189,7 @@ void audio_late_update(void) {
 		}
 }
 
-int audio_play(struct audio_waveform *waveform, void *decoder) {
+int audio_play(struct audio_waveform *waveform, int flags, void *decoder) {
 	struct audio_voice *voice;
 	unsigned source, *names;
 	int voice_id;
@@ -222,7 +222,7 @@ int audio_play(struct audio_waveform *waveform, void *decoder) {
 	alSourcei(source, AL_SOURCE_RELATIVE, AL_TRUE);
 	alCheckError();
 
-	alSourcei(source, AL_LOOPING, AL_FALSE);
+	alSourcei(source, AL_LOOPING, (flags & AUDIO_LOOPING) != 0 ? AL_TRUE : AL_FALSE);
 	alCheckError();
 
 	voice->waveform = waveform;

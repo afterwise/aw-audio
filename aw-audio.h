@@ -62,7 +62,11 @@ void audio_end(void);
 void audio_update(void);
 void audio_late_update(void);
 
-int audio_play(struct audio_waveform *waveform, void *decoder);
+enum {
+	AUDIO_LOOPING = 0x1
+};
+
+int audio_play(struct audio_waveform *waveform, int flags, void *decoder);
 void audio_stop(int voice_id);
 
 static inline u64 audio_waveform_bufferable(const struct audio_waveform *waveform, u64 offset) {
