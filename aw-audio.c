@@ -90,10 +90,6 @@ void audio_init(struct lma *lma) {
 
 	alGenBuffers(AUDIO_VOICE_COUNT * 2, audio->names);
 	alCheckError();
-
-	debugf(
-		"audio_init: %s %s (%s)",
-		alGetString(AL_RENDERER), alGetString(AL_VERSION), alGetString(AL_VENDOR));
 }
 
 void audio_end(void) {
