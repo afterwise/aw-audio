@@ -7,8 +7,8 @@ static size_t ima_render(
 		s16 **output, u64 *frame_offset, const struct audio_waveform *waveform, void *decoder) {
 	unsigned frame_count = audio_waveform_bufferable(waveform, *frame_offset);
 
+	ima_decode(*output, *frame_offset, frame_count, waveform->data, waveform->channel_count, decoder);
 	*frame_offset += frame_count;
-	ima_decode(*output, frame_count, waveform->data, waveform->channel_count, decoder);
 
 	return frame_count * (waveform->channel_count * sizeof (u16));
 }

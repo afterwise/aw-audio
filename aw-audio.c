@@ -25,6 +25,7 @@ struct audio_voice {
 	void *decoder;
 	u64 frame_offset;
 	unsigned buffer_index;
+	int flags;
 };
 
 struct audio {
@@ -119,7 +120,8 @@ static void queue_voice(
 	s16 *buffer = &buffers[(voice_id * 2 + voice->buffer_index) * AUDIO_BUFFER_SIZE];
 	size_t size;
 
-	if (voice->frame_offset < waveform->frame_count)
+	if (voice->frame_offset < waveform->frame_count) {
+loop:
 		if ((size = waveform->render(&buffer, &voice->frame_offset, waveform, voice->decoder)) > 0) {
 			alBufferDataStatic(
 				name, waveform->native_format,
@@ -131,6 +133,10 @@ static void queue_voice(
 
 			voice->buffer_index ^= 1;
 		}
+	} else if ((voice->flags & AUDIO_LOOPING) != 0) {
+		voice->frame_offset = 0;
+		goto loop;
+	}
 }
 
 void audio_update(void) {
@@ -222,12 +228,13 @@ int audio_play(struct audio_waveform *waveform, int flags, void *decoder) {
 	alSourcei(source, AL_SOURCE_RELATIVE, AL_TRUE);
 	alCheckError();
 
-	alSourcei(source, AL_LOOPING, (flags & AUDIO_LOOPING) != 0 ? AL_TRUE : AL_FALSE);
+	alSourcei(source, AL_LOOPING, AL_FALSE);
 	alCheckError();
 
 	voice->waveform = waveform;
 	voice->decoder = decoder;
 	voice->frame_offset = 0;
+	voice->flags = flags;
 
 	return voice_id;
 }
