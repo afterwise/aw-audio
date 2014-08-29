@@ -236,7 +236,7 @@ static size_t ima_render(
 	return frame_count * (waveform->channel_count * sizeof (u16));
 }
 
-int audio_waveform_set_caf(struct voice_waveform *waveform, const void *data, size_t size) {
+int audio_setimadata(struct voice_waveform *waveform, const void *data, size_t size) {
 	struct ima_info info;
 	int err;
 
@@ -271,7 +271,7 @@ static size_t wav_render(s16 **output, u64 *frame_offset, const struct voice_wav
 	return frame_count * (waveform->channel_count * sizeof (s16));
 }
 
-int audio_waveform_set_wav(struct voice_waveform *waveform, const void *data, size_t size) {
+int audio_setwavdata(struct voice_waveform *waveform, const void *data, size_t size) {
 	struct wav_info info;
 	int err;
 
