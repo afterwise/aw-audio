@@ -89,6 +89,8 @@ void audio_init(struct lma *lma) {
 
         buffers = lma_alloc(lma, AUDIO_VOICE_COUNT * AUDIO_BUFFER_COUNT * AUDIO_BUFFER_SIZE);
         check(buffers != NULL);
+
+	voice_init(&voice_manager);
 }
 
 void audio_end(void) {
