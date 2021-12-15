@@ -1,8 +1,29 @@
+/* vim: set ts=4 sw=4 noet : */
+/*
+   Copyright (c) 2014-2021 Malte Hildingsson, malte (at) afterwi.se
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in
+   all copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+   THE SOFTWARE.
+ */
 
 #include "aw-audio.h"
 #include "aw-debug.h"
 #include "aw-ima.h"
-#include "aw-lma.h"
 #include "aw-wav.h"
 
 #if __APPLE__
@@ -11,10 +32,9 @@
 
 #if __ANDROID__
 # include <SLES/OpenSLES.h>
-#elif _WIN32 || __linux__
-# include <AL/al.h>
-# include <AL/alc.h>
-# include <AL/alext.h>
+#elif _WIN32
+# include <al.h>
+# include <alc.h>
 #elif __APPLE__
 # include <OpenAL/al.h>
 # include <OpenAL/alc.h>
@@ -26,182 +46,323 @@
 # endif
 #endif
 
-#include <string.h>
+#include <math.h>
+
+#if _MSC_VER
+# include <intrin.h>
+#endif
+
+#if __GNUC__
+# define _audio_alwaysinline inline __attribute__((always_inline))
+#elif _MSC_VER
+# define _audio_alwaysinline __forceinline
+#endif
+
+#if __GNUC__
+_audio_alwaysinline
+static int _audio_ctz32(uint32_t a) { return __builtin_ctz(a); }
+_audio_alwaysinline
+static int _audio_ctz64(uint64_t a) { return __builtin_ctzl(a); }
+#elif _MSC_VER
+_audio_alwaysinline
+static int _audio_ctz32(uint32_t a) { unsigned long r; _BitScanForward(&r, a); return (int) r; }
+_audio_alwaysinline
+static int _audio_ctz64(uint64_t a) { unsigned long r; _BitScanForward64(&r, a); return (int) r; }
+#endif
 
 #if _WIN32 || __linux__ || __APPLE__
 
 #ifndef NDEBUG
 # define alCheckError() \
-        do { \
-                int _alError = alGetError(); \
-                checkf(_alError == AL_NO_ERROR, "error=0x%08x", _alError); \
-        } while (0)
+	do { \
+		int _alError = alGetError(); \
+		checkf(_alError == AL_NO_ERROR, "error=0x%08x", _alError); \
+	} while (0)
 #else
 # define alCheckError() ((void) 0)
 #endif
 
-#if _WIN32 || __linux__
-static PFNALBUFFERDATASTATICPROC alBufferDataStatic;
-#elif __APPLE__
-static alBufferDataStaticProcPtr alBufferDataStatic;
+#if __APPLE__
+static alBufferDataStaticProcPtr _alBufferDataStatic;
 #endif
 
 #if __ANDROID__
-static unsigned active;
-static SLObjectItf object;
-static SLObjectItf objects[AUDIO_VOICE_COUNT];
-static SLPlayItf plays[AUDIO_VOICE_COUNT];
-static SLBufferQueueItf queues[AUDIO_VOICE_COUNT];
+static SLObjectItf _audio_objects[AUDIO_VOICE_COUNT];
+static SLPlayItf _audio_plays[AUDIO_VOICE_COUNT];
+static SLBufferQueueItf _audio_queues[AUDIO_VOICE_COUNT];
 #else
-static ALCdevice *device;
-static ALCcontext *context;
-static unsigned sources[AUDIO_VOICE_COUNT];
-static unsigned names[AUDIO_VOICE_COUNT * AUDIO_BUFFER_COUNT];
+static ALCdevice *_audio_device;
+static ALCcontext *_audio_context;
+static unsigned _audio_sources[AUDIO_VOICE_COUNT];
+static unsigned _audio_buffers[AUDIO_VOICE_COUNT * AUDIO_BUFFER_COUNT];
 #endif
 
-static struct voice_manager voice_manager;
-static struct voice voices[AUDIO_VOICE_COUNT];
-static int indices[AUDIO_VOICE_COUNT];
+struct audio_voice {
+	const struct audio_waveform *waveform;
+	uint64_t frame_offset;
+	void *user_data;
+	const char *debug_name;
+	uint8_t flags;
+	uint8_t dequeued_buffer_index;
+	uint8_t queued_buffer_index;
+	uint8_t inuse_buffer_count;
+};
 
-static s16 *buffers;
+struct audio_manager {
+	uint64_t available_mask;
+	uint64_t started_mask;
+};
 
-void audio_init(struct lma *lma) {
-	device = alcOpenDevice(NULL);
-	alCheckError();
-	check(device != NULL);
+static struct audio_manager _audio_manager;
+static struct audio_voice _audio_voices[AUDIO_VOICE_COUNT];
+static uint8_t _audio_memory[AUDIO_MEMORY_SIZE];
 
-	alBufferDataStatic = alcGetProcAddress(device, "alBufferDataStatic");
-	alCheckError();
-	check(alBufferDataStatic != NULL);
-
-	context = alcCreateContext(device, NULL);
-	alCheckError();
-	check(context != NULL);
-
-	alcMakeContextCurrent(context);
-	alCheckError();
-
-	alGenSources(AUDIO_VOICE_COUNT, sources);
-	alCheckError();
-
-	alGenBuffers(AUDIO_VOICE_COUNT * AUDIO_BUFFER_COUNT, names);
-	alCheckError();
-
-        buffers = lma_alloc(lma, AUDIO_VOICE_COUNT * AUDIO_BUFFER_COUNT * AUDIO_BUFFER_SIZE);
-        check(buffers != NULL);
-
-	voice_init(&voice_manager);
+static inline void _audio_manager_initialize(struct audio_manager *manager) {
+	manager->available_mask = ~0ul;
+	manager->started_mask = 0ul;
 }
 
-void audio_end(void) {
-	alDeleteSources(AUDIO_VOICE_COUNT, sources);
+static inline uint64_t _audio_manager_started_voice_mask(struct audio_manager *manager) {
+	return ~manager->available_mask & manager->started_mask;
+}
+
+static inline uint64_t _audio_manager_unstarted_voice_mask(struct audio_manager *manager) {
+	return ~manager->available_mask ^ manager->started_mask;
+}
+
+static inline audio_voice_id_t _audio_alloc_voice(struct audio_manager *manager) {
+	audio_voice_id_t id = -1;
+
+	if (manager->available_mask != 0) {
+		id = _audio_ctz64(manager->available_mask);
+		manager->available_mask &= ~(1ull << id);
+	}
+
+	return id;
+}
+
+static inline void _audio_free_voice(
+		struct audio_manager *manager, audio_voice_id_t id) {
+	manager->available_mask |= 1ull << id;
+	manager->started_mask &= ~(1ull << id);
+}
+
+static inline void _audio_start_voice(
+		struct audio_manager *manager, audio_voice_id_t id) {
+	manager->started_mask |= 1ull << id;
+}
+
+static inline void _audio_voice_prepare(
+		struct audio_voice *voice, struct audio_waveform *waveform, void *user_data,
+		int flags, const char *debug_name) {
+	voice->waveform = waveform;
+	voice->frame_offset = 0;
+	voice->user_data = user_data;
+	voice->debug_name = debug_name;
+	voice->flags = flags;
+}
+
+static inline int64_t _audio_voice_render(struct audio_voice *voice, int16_t **buffer) {
+	const struct audio_waveform *waveform = voice->waveform;
+	int64_t size;
+
+	if (voice->frame_offset < waveform->frame_count) {
+	loop:
+		if ((size = waveform->render(
+			buffer, &voice->frame_offset, waveform, voice->user_data)) > 0)
+			return size;
+	} else if ((voice->flags & AUDIO_LOOPING) != 0) {
+		voice->frame_offset = 0;
+		goto loop;
+	}
+
+	return -1;
+}
+
+static inline uint64_t _audio_waveform_bufferable(
+		const struct audio_waveform *waveform, uint64_t offset) {
+	const uint64_t a = AUDIO_BUFFER_SIZE / (waveform->channel_count * sizeof(int16_t));
+	const uint64_t b = waveform->frame_count - offset;
+	return (a < b) ? a : b;
+}
+
+int audio_initialize(void) {
+	_audio_device = alcOpenDevice(NULL);
+	alCheckError();
+	check(_audio_device != NULL);
+
+#if __APPLE__
+	_audio_alBufferDataStatic = alcGetProcAddress(audio_device, "alBufferDataStatic");
+	alCheckError();
+	check(_audio_alBufferDataStatic != NULL);
+#endif
+
+	_audio_context = alcCreateContext(_audio_device, NULL);
+	alCheckError();
+	check(_audio_context != NULL);
+
+	alcMakeContextCurrent(_audio_context);
 	alCheckError();
 
-	alDeleteBuffers(AUDIO_VOICE_COUNT * AUDIO_BUFFER_COUNT, names);
+	alGenSources(AUDIO_VOICE_COUNT, _audio_sources);
+	alCheckError();
+
+	alGenBuffers(AUDIO_VOICE_COUNT * AUDIO_BUFFER_COUNT, _audio_buffers);
+	alCheckError();
+
+	_audio_manager_initialize(&_audio_manager);
+	return 0;
+}
+
+void audio_terminate(void) {
+	alDeleteSources(AUDIO_VOICE_COUNT, _audio_sources);
+	alCheckError();
+
+	alDeleteBuffers(AUDIO_VOICE_COUNT * AUDIO_BUFFER_COUNT, _audio_buffers);
 	alCheckError();
 
 	alcMakeContextCurrent(NULL);
 	alCheckError();
 
-	alcDestroyContext(context);
+	alcDestroyContext(_audio_context);
 	alCheckError();
 
-	alcCloseDevice(device);
+	alcCloseDevice(_audio_device);
 	alCheckError();
 }
 
-static void queue_voice(
-		unsigned voice_id, unsigned source, unsigned name, s16 *buffers,
-		struct voice *voice) {
-	int index = indices[voice_id];
-	s16 *buffer = &buffers[(voice_id * AUDIO_BUFFER_COUNT + index) * AUDIO_BUFFER_SIZE];
-	ssize_t size;
+bool audio_playing(void) {
+	return _audio_manager_started_voice_mask(&_audio_manager) != 0;
+}
 
-	if ((size = voice_render(voice, &buffer)) > 0) {
-		indices[voice_id] = (index + 1) % AUDIO_BUFFER_COUNT;
+static void _audio_render_and_queue(
+		audio_voice_id_t voice_id, unsigned source, unsigned *buffers,
+		struct audio_voice *voice) {
+	const size_t offset =
+		(voice_id * AUDIO_BUFFER_COUNT +
+		voice->queued_buffer_index) * AUDIO_BUFFER_SIZE;
+	int16_t *mem = (int16_t *) &_audio_memory[offset];
+	int64_t size;
 
-		alBufferDataStatic(
-			name, voice->waveform->native_format,
-			buffer, size, voice->waveform->sample_rate);
+	(void) voice_id;
+
+	if ((size = _audio_voice_render(voice, &mem)) > 0) {
+#if __APPLE__
+		_audio_alBufferDataStatic(
+			buffers[voice->queued_buffer_index], voice->waveform->native_format,
+			mem, (ALsizei) size, voice->waveform->sample_rate);
+		alCheckError();
+#else
+		alBufferData(
+			buffers[voice->queued_buffer_index], voice->waveform->native_format,
+			mem, (ALsizei) size, voice->waveform->sample_rate);
+		alCheckError();
+#endif
+
+		alSourceQueueBuffers(source, 1, &buffers[voice->queued_buffer_index]);
 		alCheckError();
 
-		alSourceQueueBuffers(source, 1, &name);
+		voice->queued_buffer_index =
+			(voice->queued_buffer_index + 1) % AUDIO_BUFFER_COUNT;
+		voice->inuse_buffer_count++;
+
+		check(voice->inuse_buffer_count <= AUDIO_BUFFER_COUNT);
+	}
+}
+
+static void _audio_dequeue(
+		audio_voice_id_t voice_id, unsigned source, unsigned *buffers,
+		struct audio_voice *voice) {
+	int i, value = 0;
+
+	(void) voice_id;
+
+	alGetSourcei(source, AL_BUFFERS_PROCESSED, &value);
+	alCheckError();
+
+	for (i = 0; i < value; ++i) {
+		alSourceUnqueueBuffers(source, 1, &buffers[voice->dequeued_buffer_index]);
 		alCheckError();
+
+		voice->dequeued_buffer_index =
+			(voice->dequeued_buffer_index + 1) % AUDIO_BUFFER_COUNT;
+		voice->inuse_buffer_count--;
+
+		check(voice->inuse_buffer_count <= AUDIO_BUFFER_COUNT);
 	}
 }
 
 void audio_update(void) {
-	unsigned i, source, name;
-	u32 mask = voice_getopen(&voice_manager);
+	struct audio_voice* voice;
+	uint64_t mask = _audio_manager_started_voice_mask(&_audio_manager);
+	unsigned i, source, *buffers;
 	int value;
 
 	if (mask != 0)
 		for (i = 0; i < AUDIO_VOICE_COUNT; ++i) {
-			if ((mask & (1 << i)) == 0)
+			if ((mask & (1ull << i)) == 0)
 				continue;
 
-			source = sources[i];
+			voice = &_audio_voices[i];
+			source = _audio_sources[i];
+			buffers = &_audio_buffers[i * AUDIO_BUFFER_COUNT];
 
-			alGetSourcei(source, AL_BUFFERS_PROCESSED, &value);
-			alCheckError();
-
-			while (value-- > 0) {
-				alSourceUnqueueBuffers(source, 1, &name);
-				alCheckError();
-
-				queue_voice(i, source, name, buffers, &voices[i]);
-			}
+			_audio_dequeue(i, source, buffers, voice);
 
 			alGetSourcei(source, AL_SOURCE_STATE, &value);
 			alCheckError();
 
-			if (value == AL_STOPPED)
-				voice_close(&voice_manager, 1 << i);
+			if (value == AL_PLAYING) {
+				if (voice->inuse_buffer_count < AUDIO_BUFFER_COUNT)
+					_audio_render_and_queue(i, source, buffers, voice);
+			} else if (value == AL_STOPPED) {
+				if ((voice->flags & AUDIO_RELEASE) != 0)
+					_audio_free_voice(&_audio_manager, i);
+			}
 		}
-}
 
-void audio_late_update(void) {
-	struct voice *voice;
-	u32 mask = voice_getunstarted(&voice_manager);
-	unsigned i, source, *name;
+	mask = _audio_manager_unstarted_voice_mask(&_audio_manager);
 
 	if (mask != 0)
 		for (i = 0; i < AUDIO_VOICE_COUNT; ++i) {
-			if ((mask & (1 << i)) == 0)
+			if ((mask & (1ull << i)) == 0)
 				continue;
 
-			voice_start(&voice_manager, 1 << i);
+			_audio_start_voice(&_audio_manager, i);
 
-			voice = &voices[i];
-			source = sources[i];
-			name = &names[i * AUDIO_BUFFER_COUNT];
+			voice = &_audio_voices[i];
+			source = _audio_sources[i];
+			buffers = &_audio_buffers[i * AUDIO_BUFFER_COUNT];
 
-			queue_voice(i, source, name[indices[i]], buffers, voice);
-			queue_voice(i, source, name[indices[i]], buffers, voice);
+			_audio_dequeue(i, source, buffers, voice);
+			check(voice->inuse_buffer_count == 0);
+
+			_audio_render_and_queue(i, source, buffers, voice);
+			_audio_render_and_queue(i, source, buffers, voice);
 
 			alSourcePlay(source);
 			alCheckError();
 		}
 }
 
-int audio_play(struct voice_waveform *waveform, void *decoder, int voice_flags) {
-	struct voice *voice;
+audio_voice_id_t audio_play(
+		struct audio_waveform *waveform, void *decoder, int flags,
+		const char *debug_name) {
+	struct audio_voice *voice;
+	audio_voice_id_t voice_id;
 	unsigned source;
-	int voice_id;
-	float zero[3];
+	float zero[3] = {0.f, 0.f, 0.f};
 
-	if ((voice_id = voice_open(&voice_manager)) < 0)
+	if ((voice_id = _audio_alloc_voice(&_audio_manager)) < 0)
 		return voice_id;
 
-	voice = &voices[voice_id];
-	source = sources[voice_id];
-
-	memset(zero, 0, sizeof zero);
+	voice = &_audio_voices[voice_id];
+	source = _audio_sources[voice_id];
 
 	alSourcef(source, AL_PITCH, 1.0f);
 	alCheckError();
 
-	alSourcef(source, AL_GAIN, 1.0f);
+	alSourcef(source, AL_GAIN, 0.6f);
 	alCheckError();
 
 	alSourcefv(source, AL_POSITION, zero);
@@ -216,29 +377,39 @@ int audio_play(struct voice_waveform *waveform, void *decoder, int voice_flags) 
 	alSourcei(source, AL_LOOPING, AL_FALSE);
 	alCheckError();
 
-	voice_finalize(voice, waveform, decoder, voice_flags);
-
+	_audio_voice_prepare(voice, waveform, decoder, flags, debug_name);
 	return voice_id;
 }
 
-void audio_stop(int voice_id) {
-	alSourceStop(sources[voice_id]);
+void audio_stop(audio_voice_id_t voice_id) {
+	struct audio_voice* voice;
+	unsigned source;
+
+	voice = &_audio_voices[voice_id];
+	source = _audio_sources[voice_id];
+
+	voice->flags |= AUDIO_RELEASE;
+
+	alSourceStop(_audio_sources[voice_id]);
 	alCheckError();
-
-	voice_close(&voice_manager, voice_id);
 }
 
-static size_t ima_render(
-		s16 **output, u64 *frame_offset, const struct voice_waveform *waveform, void *decoder) {
-	unsigned frame_count = audio_waveform_bufferable(waveform, *frame_offset);
+static int64_t _ima_render(
+		int16_t **output, uint64_t *frame_offset,
+		const struct audio_waveform *waveform, void *decoder) {
+	const uint64_t offset = *frame_offset;
+	const uint64_t frame_count = _audio_waveform_bufferable(waveform, offset);
 
-	ima_decode(*output, *frame_offset, frame_count, waveform->data, waveform->channel_count, decoder);
-	*frame_offset += frame_count;
+	ima_decode(
+		*output, offset, frame_count, waveform->data, waveform->channel_count, decoder);
+	*frame_offset = offset + frame_count;
 
-	return frame_count * (waveform->channel_count * sizeof (u16));
+	const uint64_t frame_size = (uint64_t) waveform->channel_count * sizeof(int16_t);
+	return (int64_t) (frame_count * frame_size);
 }
 
-int audio_setimadata(struct voice_waveform *waveform, const void *data, size_t size) {
+int audio_waveform_prepare_ima(
+		struct audio_waveform *waveform, const void *data, size_t size) {
 	struct ima_info info;
 	int err;
 
@@ -247,33 +418,38 @@ int audio_setimadata(struct voice_waveform *waveform, const void *data, size_t s
 	if ((err = ima_parse(&info, data)) < 0)
 		return err;
 
-	waveform->render = &ima_render;
+	waveform->render = &_ima_render;
 	waveform->data = info.blocks;
 
 	waveform->frame_count = info.frame_count;
 	waveform->channel_count = info.channel_count;
 
 	check(waveform->channel_count == 1 || waveform->channel_count == 2);
-	waveform->native_format = (waveform->channel_count == 1) ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16;
+	waveform->native_format =
+		(waveform->channel_count == 1) ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16;
 
-	waveform->sample_rate = round_f64(info.sample_rate);
+	waveform->sample_rate = (unsigned) lround(info.sample_rate);
 
 	return 0;
 }
 
-static size_t wav_render(s16 **output, u64 *frame_offset, const struct voice_waveform *waveform, void *decoder) {
-	u64 offset = *frame_offset;
-	u64 frame_count = audio_waveform_bufferable(waveform, offset);
+static int64_t _wav_render(
+		int16_t **output, uint64_t *frame_offset,
+		const struct audio_waveform *waveform, void *decoder) {
+	const uint64_t offset = *frame_offset;
+	const uint64_t frame_count = _audio_waveform_bufferable(waveform, offset);
 
 	(void) decoder;
 
-	*output = (s16 *) waveform->data + offset * waveform->channel_count;
+	*output = (int16_t *) waveform->data + offset * waveform->channel_count;
 	*frame_offset = offset + frame_count;
 
-	return frame_count * (waveform->channel_count * sizeof (s16));
+	const uint64_t frame_size = (uint64_t) waveform->channel_count * sizeof(int16_t);
+	return (int64_t) (frame_count * frame_size);
 }
 
-int audio_setwavdata(struct voice_waveform *waveform, const void *data, size_t size) {
+int audio_waveform_prepare_wav(
+		struct audio_waveform *waveform, const void *data, size_t size) {
 	struct wav_info info;
 	int err;
 
@@ -282,16 +458,17 @@ int audio_setwavdata(struct voice_waveform *waveform, const void *data, size_t s
 	if ((err = wav_parse(&info, data)) < 0)
 		return err;
 
-	waveform->render = &wav_render;
+	waveform->render = &_wav_render;
 	waveform->data = info.blocks;
 
 	waveform->frame_count = info.frame_count;
 	waveform->channel_count = info.channel_count;
 
 	check(waveform->channel_count == 1 || waveform->channel_count == 2);
-	waveform->native_format = (waveform->channel_count == 1) ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16;
+	waveform->native_format =
+		(waveform->channel_count == 1) ? AL_FORMAT_MONO16 : AL_FORMAT_STEREO16;
 
-	waveform->sample_rate = round_f64(info.sample_rate);
+	waveform->sample_rate = (unsigned) lround(info.sample_rate);
 
 	return 0;
 }
