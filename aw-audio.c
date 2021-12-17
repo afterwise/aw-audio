@@ -54,19 +54,21 @@
 
 #if __GNUC__
 # define _audio_alwaysinline inline __attribute__((always_inline))
+# define _audio_unused __attribute__((__unused__))
 #elif _MSC_VER
 # define _audio_alwaysinline __forceinline
+# define _audio_unused
 #endif
 
 #if __GNUC__
-_audio_alwaysinline
+_audio_alwaysinline _audio_unused
 static int _audio_ctz32(uint32_t a) { return __builtin_ctz(a); }
-_audio_alwaysinline
+_audio_alwaysinline _audio_unused
 static int _audio_ctz64(uint64_t a) { return __builtin_ctzl(a); }
 #elif _MSC_VER
-_audio_alwaysinline
+_audio_alwaysinline _audio_unused
 static int _audio_ctz32(uint32_t a) { unsigned long r; _BitScanForward(&r, a); return (int) r; }
-_audio_alwaysinline
+_audio_alwaysinline _audio_unused
 static int _audio_ctz64(uint64_t a) { unsigned long r; _BitScanForward64(&r, a); return (int) r; }
 #endif
 
@@ -83,7 +85,7 @@ static int _audio_ctz64(uint64_t a) { unsigned long r; _BitScanForward64(&r, a);
 #endif
 
 #if __APPLE__
-static alBufferDataStaticProcPtr _alBufferDataStatic;
+static alBufferDataStaticProcPtr _audio_alBufferDataStatic;
 #endif
 
 #if __ANDROID__
@@ -192,7 +194,7 @@ int audio_initialize(void) {
 	check(_audio_device != NULL);
 
 #if __APPLE__
-	_audio_alBufferDataStatic = alcGetProcAddress(audio_device, "alBufferDataStatic");
+	_audio_alBufferDataStatic = alcGetProcAddress(_audio_device, "alBufferDataStatic");
 	alCheckError();
 	check(_audio_alBufferDataStatic != NULL);
 #endif
